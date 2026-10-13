@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+      xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+        http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+
+    <munit:config name="compute-lists-test.xml" />
+
+    <munit:test name="create-update-and-do-not-use" description="Drives compute-create-and-update-lists directly with no I/O">
+        <munit:behavior>
+            <!-- one existing active project, one existing project whose activity is gone, one brand-new activity -->
+            <set-variable variableName="ukgProjects" value="#[[
+                { code: '100045010', description: 'Old Name' },
+                { code: '999999999', description: 'Gone Project' }
+            ]]" />
+            <set-variable variableName="activities" value="#[[
+                { key: '1000-45-010', value: 'New Name' },
+                { key: '2000-11-222', value: 'Fresh Activity' }
+            ]]" />
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="compute-create-and-update-lists" />
+        </munit:execution>
+        <munit:validation>
+            <!-- 2000-11-222 is new -> one create with stripped code -->
+            <munit-tools:assert-that expression="#[sizeOf(vars.toCreate)]" is="#[MunitTools::equalTo(1)]" />
+            <munit-tools:assert-that expression="#[vars.toCreate[0].code]" is="#[MunitTools::equalTo('200011222')]" />
+            <!-- 100045010 description changed, 999999999 has no activity -> 2 updates -->
+            <munit-tools:assert-that expression="#[sizeOf(vars.toUpdate)]" is="#[MunitTools::equalTo(2)]" />
+            <munit-tools:assert-that
+                expression="#[(vars.toUpdate filter ($.code == '999999999'))[0].description]"
+                is="#[MunitTools::equalTo('DO NOT USE Gone Project')]" />
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="numeric-and-null-ukg-codes" description="UKG codes returned as numbers still match Sage; null codes are ignored">
+        <munit:behavior>
+            <set-variable variableName="ukgProjects" value="#[[
+                { code: 100045010, description: 'Same Name' },
+                { code: null, description: 'Broken Row' }
+            ]]" />
+            <set-variable variableName="activities" value="#[[
+                { key: '1000-45-010', value: 'Same Name' }
+            ]]" />
+        </munit:behavior>
+        <munit:execution>
+            <flow-ref name="compute-create-and-update-lists" />
+        </munit:execution>
+        <munit:validation>
+            <!-- 100045010 already exists (as a number) -> nothing to create, nothing to update -->
+            <munit-tools:assert-that expression="#[sizeOf(vars.toCreate)]" is="#[MunitTools::equalTo(0)]" />
+            <munit-tools:assert-that expression="#[sizeOf(vars.toUpdate)]" is="#[MunitTools::equalTo(0)]" />
+        </munit:validation>
+    </munit:test>
+</mule>

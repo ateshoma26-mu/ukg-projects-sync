@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd">
+
+    <flow name="ukg-projects-sync-main">
+        <scheduler doc:name="Daily" disallowConcurrentExecution="true">
+            <scheduling-strategy><cron expression="${schedule.cron}" /></scheduling-strategy>
+        </scheduler>
+        <flow-ref name="fetch-ukg-projects" doc:name="Fetch UKG projects" />
+        <flow-ref name="fetch-sage-activities" doc:name="Fetch Sage activities" />
+        <flow-ref name="compute-create-and-update-lists" doc:name="Compute lists" />
+        <logger level="INFO" message="#['[' ++ correlationId ++ '] UKG projects: ' ++ sizeOf(vars.toCreate) ++ ' to create, ' ++ sizeOf(vars.toUpdate) ++ ' to update']" />
+
+        <!-- Creates and updates touch distinct codes, so they run together. Each route
+             returns a result object and never throws, so one bad record can't fail the batch. -->
+        <parallel-foreach doc:name="Write to UKG" maxConcurrency="${ukg.maxConcurrency}"
+            collection="#[(vars.toCreate map ($ ++ { op: 'create' })) ++ (vars.toUpdate map ($ ++ { op: 'update' }))]">
+            <flow-ref name="write-ukg-project" />
+        </parallel-foreach>
+        <ee:transform doc:name="Collect write results">
+            <ee:variables>
+                <ee:set-variable variableName="writeFailures"><![CDATA[%dw 2.0
+output application/json
+---
+(payload map $.payload) filter ($.status == 'FAILED')]]></ee:set-variable>
+                <ee:set-variable variableName="writeCount"><![CDATA[%dw 2.0
+output application/json
+---
+sizeOf(payload)]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+        <logger level="INFO" message="#['[' ++ correlationId ++ '] UKG writes: ' ++ (vars.writeCount - sizeOf(vars.writeFailures)) ++ ' succeeded, ' ++ sizeOf(vars.writeFailures) ++ ' failed']" />
+
+        <!-- Snapshot what UKG actually holds, not what we intended to write. -->
+        <flow-ref name="fetch-ukg-projects" doc:name="Re-fetch UKG projects" />
+
+        <ee:transform doc:name="Build projects JSON">
+            <ee:variables>
+                <ee:set-variable variableName="ukgProjectsJson"><![CDATA[%dw 2.0
+output application/json
+---
+vars.ukgProjects map (p) -> { code: p.code, description: p.description }]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+
+        <db:stored-procedure config-ref="KCApps_DB" doc:name="Reload KCApps table">
+            <db:sql><![CDATA[{ call LP_UKG_REFRESH_PROJECTS(:data) }]]></db:sql>
+            <db:input-parameters><![CDATA[#[{ data: vars.ukgProjectsJson }]]]></db:input-parameters>
+        </db:stored-procedure>
+
+        <!-- Fail the run after the snapshot so partial write failures surface in monitoring/alerts. -->
+        <choice doc:name="Any write failures?">
+            <when expression="#[not isEmpty(vars.writeFailures)]">
+                <logger level="ERROR" message="#[output application/json indent=false --- { event: 'UKG_WRITE_FAILURES', correlationId: correlationId, count: sizeOf(vars.writeFailures), failures: vars.writeFailures }]" />
+                <raise-error type="APP:UKG_WRITE_FAILURES" description="#[sizeOf(vars.writeFailures) ++ ' UKG write(s) failed; see UKG_WRITE_FAILURES log entry']" />
+            </when>
+        </choice>
+
+        <error-handler ref="global-error-handler" />
+    </flow>
+
+    <!-- Bounded paging: iterate at most ukg.maxPages and skip calls once a short page is seen.
+         Avoids recursive flow-refs. Hitting the cap with pages still full is an error,
+         because syncing a partial list would re-create projects that already exist. -->
+    <sub-flow name="fetch-ukg-projects">
+        <set-variable variableName="pageSize" value="#[p('ukg.pageSize') as Number]" />
+        <set-variable variableName="accumulated" value="#[[]]" />
+        <set-variable variableName="morePages" value="#[true]" />
+        <foreach doc:name="Pages" collection="#[1 to (p('ukg.maxPages') as Number)]">
+            <choice>
+                <when expression="#[vars.morePages]">
+                    <http:request method="GET" config-ref="UKG_REST_API" path="configuration/v1/code-tables/project/">
+                        <http:query-params><![CDATA[#[{ per_Page: vars.pageSize, page: vars.counter }]]]></http:query-params>
+                    </http:request>
+                    <ee:transform doc:name="Accumulate">
+                        <ee:variables>
+                            <ee:set-variable variableName="accumulated"><![CDATA[%dw 2.0
+output application/json
+---
+vars.accumulated ++ (payload as Array)]]></ee:set-variable>
+                            <ee:set-variable variableName="morePages"><![CDATA[%dw 2.0
+output application/json
+---
+sizeOf(payload as Array) >= vars.pageSize]]></ee:set-variable>
+                        </ee:variables>
+                    </ee:transform>
+                </when>
+            </choice>
+        </foreach>
+        <choice doc:name="Page cap reached?">
+            <when expression="#[vars.morePages]">
+                <raise-error type="APP:PAGINATION_LIMIT" description="#['UKG still returning full pages after ' ++ p('ukg.maxPages') ++ ' pages; raise ukg.maxPages']" />
+            </when>
+        </choice>
+        <set-variable variableName="ukgProjects" value="#[vars.accumulated]" />
+    </sub-flow>
+
+    <!-- One UKG POST/PUT. Input payload: { code, description, op: 'create'|'update' }.
+         Output payload: { code, op, status: 'OK'|'FAILED', errorType?, error? }. Never throws.
+         Transient errors (429/5xx/timeouts/connectivity) are retried; anything else fails fast. -->
+    <sub-flow name="write-ukg-project">
+        <set-variable variableName="item" value="#[payload]" />
+        <try doc:name="Record failure">
+            <until-successful doc:name="Retry transient errors" maxRetries="${ukg.retry.maxRetries}" millisBetweenRetries="${ukg.retry.millisBetweenRetries}">
+                <try>
+                    <choice doc:name="Create or update">
+                        <when expression="#[vars.item.op == 'create']">
+                            <http:request method="POST" config-ref="UKG_REST_API" path="configuration/v1/code-tables/project/">
+                                <http:body><![CDATA[#[output application/x-www-form-urlencoded
+---
+{ Code: vars.item.code, Description: vars.item.description }]]]></http:body>
+                                <http:headers><![CDATA[#[{ "Content-Type": "application/x-www-form-urlencoded" }]]]></http:headers>
+                            </http:request>
+                        </when>
+                        <otherwise>
+                            <http:request method="PUT" config-ref="UKG_REST_API" path="#['configuration/v1/code-tables/project/' ++ vars.item.code]">
+                                <http:body><![CDATA[#[output application/x-www-form-urlencoded
+---
+{ Code: vars.item.code, Description: vars.item.description }]]]></http:body>
+                                <http:headers><![CDATA[#[{ "Content-Type": "application/x-www-form-urlencoded" }]]]></http:headers>
+                            </http:request>
+                        </otherwise>
+                    </choice>
+                    <set-payload value="#[{ code: vars.item.code, op: vars.item.op, status: 'OK' }]" />
+                    <error-handler>
+                        <on-error-propagate type="HTTP:TOO_MANY_REQUESTS, HTTP:SERVICE_UNAVAILABLE, HTTP:INTERNAL_SERVER_ERROR, HTTP:BAD_GATEWAY, HTTP:TIMEOUT, HTTP:CONNECTIVITY" logException="false">
+                            <logger level="WARN" message="#['[' ++ correlationId ++ '] Transient ' ++ error.errorType.identifier ++ ' on ' ++ vars.item.op ++ ' ' ++ vars.item.code ++ ', retrying']" />
+                        </on-error-propagate>
+                        <on-error-continue logException="false">
+                            <set-payload value="#[{ code: vars.item.code, op: vars.item.op, status: 'FAILED', errorType: error.errorType.namespace ++ ':' ++ error.errorType.identifier, error: error.description default 'unknown' }]" />
+                        </on-error-continue>
+                    </error-handler>
+                </try>
+            </until-successful>
+            <error-handler>
+                <on-error-continue logException="false">
+                    <set-payload value="#[{ code: vars.item.code, op: vars.item.op, status: 'FAILED', errorType: error.errorType.namespace ++ ':' ++ error.errorType.identifier, error: error.description default 'unknown' }]" />
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </sub-flow>
+
+    <sub-flow name="fetch-sage-activities">
+        <db:select config-ref="DW_DB">
+            <db:sql><![CDATA[SELECT PROJECT_ID, PROJECT_NAME FROM COA_Activity_Sage WHERE UKG is not null and UKG != 'false' and UKG != '']]></db:sql>
+        </db:select>
+        <set-variable variableName="activities" value="#[payload map (row) -> { key: row.PROJECT_ID, value: row.PROJECT_NAME }]" />
+    </sub-flow>
+
+    <sub-flow name="compute-create-and-update-lists">
+        <ee:transform doc:name="Compute create + update">
+            <ee:variables>
+                <ee:set-variable variableName="toCreate"><![CDATA[%dw 2.0
+import * from dw::UKG::CodeMapping
+import * from dw::UKG::Reconcile
+output application/json
+---
+projectsToCreate(vars.ukgProjects, activitiesByUkgCode(vars.activities))]]></ee:set-variable>
+                <ee:set-variable variableName="toUpdate"><![CDATA[%dw 2.0
+import * from dw::UKG::CodeMapping
+import * from dw::UKG::Reconcile
+output application/json
+var byCode = activitiesByUkgCode(vars.activities)
+---
+(vars.ukgProjects map (p) -> reconcileProject(p, byCode)) filter ($ != null)]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+    </sub-flow>
+</mule>

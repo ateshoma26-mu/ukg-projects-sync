@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+      xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+        http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd">
+
+    <!-- pom sets ukg.pageSize=2, ukg.maxPages=3, ukg.retry.maxRetries=3 (default) for tests. -->
+    <munit:config name="ukg-io-test.xml" />
+
+    <munit:test name="paging-stops-on-short-page" description="A page smaller than pageSize ends paging after one call">
+        <munit:behavior>
+            <munit-tools:mock-when processor="http:request">
+                <munit-tools:with-attributes><munit-tools:with-attribute attributeName="method" whereValue="GET" /></munit-tools:with-attributes>
+                <munit-tools:then-return><munit-tools:payload value="#[output application/json --- [{ code: 'A', description: 'a' }]]" mediaType="application/json" /></munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution><flow-ref name="fetch-ukg-projects" /></munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[sizeOf(vars.ukgProjects)]" is="#[MunitTools::equalTo(1)]" />
+            <munit-tools:verify-call processor="http:request" times="1" />
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="paging-fails-at-page-cap" description="Full pages up to maxPages raise instead of returning a partial list"
+                expectedErrorType="APP:PAGINATION_LIMIT">
+        <munit:behavior>
+            <munit-tools:mock-when processor="http:request">
+                <munit-tools:with-attributes><munit-tools:with-attribute attributeName="method" whereValue="GET" /></munit-tools:with-attributes>
+                <munit-tools:then-return><munit-tools:payload value="#[output application/json --- [{ code: 'A' }, { code: 'B' }]]" mediaType="application/json" /></munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution><flow-ref name="fetch-ukg-projects" /></munit:execution>
+    </munit:test>
+
+    <munit:test name="write-success" description="A 2xx write returns status OK">
+        <munit:behavior>
+            <munit-tools:mock-when processor="http:request">
+                <munit-tools:then-return><munit-tools:payload value="#[{}]" mediaType="application/json" /></munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <set-payload value="#[{ code: '100', description: 'X', op: 'create' }]" />
+            <flow-ref name="write-ukg-project" />
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.status]" is="#[MunitTools::equalTo('OK')]" />
+            <munit-tools:verify-call processor="http:request" times="1">
+                <munit-tools:with-attributes><munit-tools:with-attribute attributeName="method" whereValue="POST" /></munit-tools:with-attributes>
+            </munit-tools:verify-call>
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="write-client-error-not-retried" description="A 400 fails fast: one call, status FAILED">
+        <munit:behavior>
+            <munit-tools:mock-when processor="http:request">
+                <munit-tools:then-return><munit-tools:error typeId="HTTP:BAD_REQUEST" /></munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <set-payload value="#[{ code: '100', description: 'X', op: 'update' }]" />
+            <flow-ref name="write-ukg-project" />
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.status]" is="#[MunitTools::equalTo('FAILED')]" />
+            <munit-tools:assert-that expression="#[payload.errorType]" is="#[MunitTools::equalTo('HTTP:BAD_REQUEST')]" />
+            <munit-tools:verify-call processor="http:request" times="1" />
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="write-transient-error-retried" description="A 503 is retried maxRetries times, then FAILED">
+        <munit:behavior>
+            <munit-tools:mock-when processor="http:request">
+                <munit-tools:then-return><munit-tools:error typeId="HTTP:SERVICE_UNAVAILABLE" /></munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <set-payload value="#[{ code: '100', description: 'X', op: 'update' }]" />
+            <flow-ref name="write-ukg-project" />
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.status]" is="#[MunitTools::equalTo('FAILED')]" />
+            <!-- 1 initial attempt + 3 retries -->
+            <munit-tools:verify-call processor="http:request" times="4" />
+        </munit:validation>
+    </munit:test>
+</mule>

@@ -1,0 +1,11 @@
+# Secrets for env=local. Values must be encrypted with the Secure Properties Tool
+# and wrapped as ![...] using the key passed at runtime as -Dsecure.key=...
+# (AES/CBC). Unwrapped values are read as plain text, which is only acceptable
+# for local placeholders. Create secure-dev.yaml / secure-prod.yaml per environment.
+ukg:
+  oauth:
+    clientSecret: "CHANGE_ME"
+dw:
+  password: "CHANGE_ME"
+kcapps:
+  password: "CHANGE_ME"

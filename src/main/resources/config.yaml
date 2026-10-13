@@ -1,0 +1,29 @@
+# Non-secret config. Secrets live in secure-${env}.yaml (see README).
+schedule:
+  cron: "0 0 3 * * ?"
+ukg:
+  host: "your-tenant.ukg.net"
+  basePath: "/api"
+  responseTimeoutMs: "30000"
+  pageSize: "1000"
+  # Hard stop for paging. If page maxPages is still full the run fails instead of
+  # syncing a partial list (a partial list would cause duplicate creates).
+  maxPages: "200"
+  # Concurrent POST/PUT calls. Tune to the tenant's rate limit.
+  maxConcurrency: "4"
+  retry:
+    maxRetries: "3"
+    millisBetweenRetries: "5000"
+  oauth:
+    tokenUrl: "https://your-tenant.ukg.net/api/authentication/access_token"
+    clientId: "CHANGE_ME"
+dw:
+  host: "dw-sql-server.internal"
+  port: "1433"
+  database: "DataWarehouse"
+  user: "ukg_sync_reader"
+kcapps:
+  host: "kcapps-sql-server.internal"
+  port: "1433"
+  database: "KCApps"
+  user: "ukg_sync_writer"

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:oauth="http://www.mulesoft.org/schema/mule/oauth"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:secure-properties="http://www.mulesoft.org/schema/mule/secure-properties"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/oauth http://www.mulesoft.org/schema/mule/oauth/current/mule-oauth.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/secure-properties http://www.mulesoft.org/schema/mule/secure-properties/current/mule-secure-properties.xsd">
+
+    <!-- Overridden per deployment with -Denv=dev|prod; secure.key is always supplied at runtime, never stored. -->
+    <global-property name="env" value="local" />
+    <configuration-properties file="config.yaml" />
+    <secure-properties:config name="Secure_Properties" file="secure-${env}.yaml" key="${secure.key}">
+        <secure-properties:encrypt algorithm="AES" mode="CBC" />
+    </secure-properties:config>
+
+    <!-- OAuth client credentials: the module fetches the token and refreshes it on 401/403. -->
+    <http:request-config name="UKG_REST_API" doc:name="UKG REST API" basePath="${ukg.basePath}" responseTimeout="${ukg.responseTimeoutMs}">
+        <http:request-connection host="${ukg.host}" port="443" protocol="HTTPS">
+            <reconnection><reconnect frequency="5000" count="3" /></reconnection>
+            <http:authentication>
+                <oauth:client-credentials-grant-type
+                    clientId="${ukg.oauth.clientId}"
+                    clientSecret="${secure::ukg.oauth.clientSecret}"
+                    tokenUrl="${ukg.oauth.tokenUrl}" />
+            </http:authentication>
+        </http:request-connection>
+        <http:default-headers>
+            <http:default-header key="Accept" value="application/json" />
+        </http:default-headers>
+    </http:request-config>
+
+    <db:config name="DW_DB" doc:name="DW Database">
+        <db:mssql-connection host="${dw.host}" port="${dw.port}" databaseName="${dw.database}" user="${dw.user}" password="${secure::dw.password}">
+            <reconnection><reconnect frequency="5000" count="3" /></reconnection>
+        </db:mssql-connection>
+    </db:config>
+    <db:config name="KCApps_DB" doc:name="KCApps Database">
+        <db:mssql-connection host="${kcapps.host}" port="${kcapps.port}" databaseName="${kcapps.database}" user="${kcapps.user}" password="${secure::kcapps.password}">
+            <reconnection><reconnect frequency="5000" count="3" /></reconnection>
+        </db:mssql-connection>
+    </db:config>
+
+    <error-handler name="global-error-handler" doc:name="global-error-handler">
+        <on-error-propagate doc:name="Log and propagate">
+            <logger level="ERROR" message="#['ukg-projects-sync failed [' ++ correlationId ++ '] ' ++ (error.errorType.namespace default '') ++ ':' ++ (error.errorType.identifier default '') ++ ' - ' ++ (error.description default 'unknown error')]" />
+        </on-error-propagate>
+    </error-handler>
+</mule>
